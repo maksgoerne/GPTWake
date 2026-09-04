@@ -1,0 +1,55 @@
+name: Build GPTWake S24 fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-s24-fix.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK 37
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Fix nested vertical scrolling crash
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/java/com/desmond/gptwake/ui/GptWakeScreen.kt")
+          s = p.read_text()
+          old = "                .verticalScroll(rememberScrollState())\n                .horizontalScroll(rememberScrollState()),"
+          new = "                .horizontalScroll(rememberScrollState()),"
+          if old not in s:
+              raise SystemExit("Expected nested-scroll block not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GPTWake-S24-fixed
+          path: app/build/outputs/apk/debug/app-debug.apk
