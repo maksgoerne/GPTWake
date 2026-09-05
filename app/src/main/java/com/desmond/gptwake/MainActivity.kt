@@ -122,6 +122,9 @@ class MainActivity : ComponentActivity() {
                     askOrOpenSettings(Manifest.permission.POST_NOTIFICATIONS)
                 }
 
+            SetupStep.NOTIFICATION_ACCESS ->
+                launch(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+
             SetupStep.OVERLAY -> launch(
                 Intent(
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -180,7 +183,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         val step = readPermissions(this).next
-        if (step == SetupStep.MIC || step == SetupStep.OVERLAY) {
+        if (step == SetupStep.MIC || step == SetupStep.NOTIFICATION_ACCESS || step == SetupStep.OVERLAY) {
             runStep(step)
             return
         }
