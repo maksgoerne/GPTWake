@@ -17,6 +17,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Restore persistent signing key
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing $name. Restore the key used for the installed APK; a new key cannot update it."
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/gptwake-signing.keystore"
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -46,6 +64,11 @@ jobs:
           PY
 
       - name: Build debug APK
+        env:
+          GPTWAKE_SIGNING_STORE_FILE: ${{ runner.temp }}/gptwake-signing.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon :app:assembleDebug
@@ -55,3 +78,8 @@ jobs:
         with:
           name: GPTWake-S24-fixed
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Remove signing key
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/gptwake-signing.keystore"
