@@ -18,8 +18,6 @@ public class WakeService extends Service {
 
     private static final String CH = "listening";
     private static final int ID = 7311;
-
-    /** Sent by the notification's Stop action. */
     static final String ACTION_STOP = "com.desmond.gptwake.STOP";
 
     public static final String EXTRA_ACK = "ack";
@@ -32,13 +30,8 @@ public class WakeService extends Service {
     private Handler bg;
     private static volatile WakeController controller;
 
-    public static WakeController controller() {
-        return controller;
-    }
-
-    public static boolean isForegroundNow() {
-        return FOREGROUND.get();
-    }
+    public static WakeController controller() { return controller; }
+    public static boolean isForegroundNow() { return FOREGROUND.get(); }
 
     @Override
     public void onCreate() {
@@ -55,6 +48,14 @@ public class WakeService extends Service {
                 : intent.getParcelableExtra(EXTRA_ACK, ResultReceiver.class);
 
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            WakeController c = controller;
+            if (c != null && (c.state() == WakeController.State.VOICE_ACTIVE
+                    || c.state() == WakeController.State.CHATGPT_LAUNCHING)) {
+                boolean sent = c.endVoice();
+                L.i("VOICE_STOP_FROM_NOTIFICATION sent=" + sent);
+                // Do not kill GPTWake here: after ChatGPT ends, the controller re-acquires the mic.
+                return START_STICKY;
+            }
             L.i("MIC_FGS_STOP_FROM_NOTIFICATION");
             stopSelf();
             return START_NOT_STICKY;
@@ -74,8 +75,6 @@ public class WakeService extends Service {
                 return START_NOT_STICKY;
             }
         } else {
-            // The wake phrase may have changed since the service started, so refresh rather than
-            // leaving the notification showing a phrase that is no longer armed.
             refreshNotification();
             L.i("MIC_FGS_ALREADY_FOREGROUND");
         }
@@ -91,7 +90,6 @@ public class WakeService extends Service {
         }
 
         if (ack != null) {
-            // ACK only once the capture loop is actually producing audio.
             bg.postDelayed(() -> {
                 boolean ok = AudioProbe.isRunning();
                 L.i("FGS_ACK running=" + ok + " last=" + AudioProbe.lastResult());
@@ -110,10 +108,6 @@ public class WakeService extends Service {
         nm.createNotificationChannel(ch);
     }
 
-    /**
-     * The persistent notification. Carries a Stop action because the lock-screen path never
-     * surfaces any other way to stop listening, and shows the phrase that is currently armed.
-     */
     private Notification buildNotification() {
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -122,24 +116,27 @@ public class WakeService extends Service {
                 new Intent(this, WakeService.class).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE);
 
+        WakeController c = controller;
+        boolean voice = c != null && (c.state() == WakeController.State.VOICE_ACTIVE
+                || c.state() == WakeController.State.CHATGPT_LAUNCHING);
+
         return new NotificationCompat.Builder(this, CH)
-                .setContentTitle(getString(R.string.notification_listening))
-                .setContentText(WakeWordStore.phrase(this))
+                .setContentTitle(voice ? "ChatGPT voice is active"
+                        : getString(R.string.notification_listening))
+                .setContentText(voice ? "Tap Stop to end voice and return to Jarvis"
+                        : WakeWordStore.phrase(this))
                 .setSmallIcon(R.drawable.ic_mic)
                 .setContentIntent(open)
-                .addAction(0, getString(R.string.action_stop_listening), stop)
+                .addAction(0, voice ? "End voice" : getString(R.string.action_stop_listening), stop)
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setLocalOnly(true)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                // The wake phrase is not a secret, but it is user content: keep it off a locked
-                // screen and show the title only.
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
                 .build();
     }
 
-    /** Re-posts the notification so a changed wake phrase is reflected. No-op when not running. */
     static void refresh(android.content.Context context) {
         if (!FOREGROUND.get()) return;
         context.startService(new Intent(context, WakeService.class));
@@ -154,11 +151,6 @@ public class WakeService extends Service {
         }
     }
 
-    /**
-     * Test one: keep this FGS alive, release the mic mid-flight, then re-acquire it later
-     * with no ShimActivity in between. All timing is internal so no adb interaction can
-     * grant the process a temporary exemption.
-     */
     private void scheduleCycle(int stopAfterSec, int resumeAfterSec) {
         L.i("CYCLE_SCHEDULED stopAfter=" + stopAfterSec + "s resumeAfter=" + resumeAfterSec + "s");
         AudioProbe.start("CYCLE_PHASE1");
@@ -197,7 +189,5 @@ public class WakeService extends Service {
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    public IBinder onBind(Intent intent) { return null; }
 }
