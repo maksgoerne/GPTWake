@@ -1,7 +1,7 @@
 package com.desmond.gptwake.ui
 
 import android.Manifest
-import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -55,6 +55,16 @@ data class Permissions(
     }
 }
 
+private fun hasNotificationListenerAccess(context: Context): Boolean = runCatching {
+    val flat = Settings.Secure.getString(
+        context.contentResolver,
+        "enabled_notification_listeners",
+    ).orEmpty()
+    flat.split(':').any { entry ->
+        ComponentName.unflattenFromString(entry)?.packageName == context.packageName
+    }
+}.getOrDefault(false)
+
 fun readPermissions(context: Context) = Permissions(
     mic = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
             == PackageManager.PERMISSION_GRANTED,
@@ -63,9 +73,7 @@ fun readPermissions(context: Context) = Permissions(
             == PackageManager.PERMISSION_GRANTED,
     // This is separate from POST_NOTIFICATIONS. GPTWake needs listener access so it can invoke the
     // action exposed by ChatGPT's ongoing Voice notification and really end a Voice session.
-    notificationAccess = runCatching {
-        NotificationManager.getEnabledListenerPackages(context).contains(context.packageName)
-    }.getOrDefault(false),
+    notificationAccess = hasNotificationListenerAccess(context),
     overlay = Settings.canDrawOverlays(context),
     // ChatGPT must hold the assistant role or it cannot record under keyguard. This app must never
     // take that role for itself.
