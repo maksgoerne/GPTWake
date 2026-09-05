@@ -123,8 +123,10 @@ public final class AudioStateMonitor {
     }
 
     /**
-     * ChatGPT Voice normally uses communication/assistant audio usage for spoken responses. We do
-     * not count MEDIA so music in Android Auto cannot keep the Jarvis voice session alive forever.
+     * ChatGPT Voice may route spoken answers as ASSISTANT/VOICE_COMMUNICATION, but on some Samsung
+     * builds the official app exposes them as ordinary MEDIA with CONTENT_TYPE_SPEECH. Count that
+     * combination too. We deliberately do not count MEDIA+MUSIC, so Spotify/Android Auto music does
+     * not look like the assistant speaking and keep a voice session alive forever.
      */
     private static boolean hasVoicePlayback(List<AudioPlaybackConfiguration> cfgs) {
         if (cfgs == null) return false;
@@ -133,8 +135,12 @@ public final class AudioStateMonitor {
                 AudioAttributes a = c.getAudioAttributes();
                 if (a == null) continue;
                 int usage = a.getUsage();
+                int content = a.getContentType();
                 if (usage == AudioAttributes.USAGE_VOICE_COMMUNICATION
-                        || usage == AudioAttributes.USAGE_ASSISTANT) {
+                        || usage == AudioAttributes.USAGE_ASSISTANT
+                        || ((usage == AudioAttributes.USAGE_MEDIA
+                                || usage == AudioAttributes.USAGE_UNKNOWN)
+                                && content == AudioAttributes.CONTENT_TYPE_SPEECH)) {
                     return true;
                 }
             } catch (Throwable ignored) {
