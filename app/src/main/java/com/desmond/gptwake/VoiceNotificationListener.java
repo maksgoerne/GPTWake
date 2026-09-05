@@ -13,6 +13,36 @@ public class VoiceNotificationListener extends NotificationListenerService {
         return hangUp;
     }
 
+    /** True when ChatGPT exposed a usable hang-up action through its ongoing voice notification. */
+    public static boolean canHangUp() {
+        return hangUp != null;
+    }
+
+    /**
+     * Triggers ChatGPT's own hang-up PendingIntent. This is the same action Android surfaces in the
+     * ongoing voice notification, so it ends the actual voice session instead of merely stopping
+     * GPTWake.
+     */
+    public static boolean tryHangUp() {
+        PendingIntent pi = hangUp;
+        if (pi == null) {
+            L.i("NLS_HANGUP_UNAVAILABLE");
+            return false;
+        }
+        try {
+            pi.send();
+            L.i("NLS_HANGUP_SENT");
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            hangUp = null;
+            L.e("NLS_HANGUP_CANCELED", e);
+            return false;
+        } catch (Throwable t) {
+            L.e("NLS_HANGUP_FAIL", t);
+            return false;
+        }
+    }
+
     private boolean isChatGptVoice(StatusBarNotification sbn) {
         if (!"com.openai.chatgpt".equals(sbn.getPackageName())) return false;
         Notification n = sbn.getNotification();
