@@ -62,12 +62,9 @@ class MainActivity : ComponentActivity() {
 
                 val ui by rememberWakeUiState()
                 val polled by rememberPermissions(context)
-                // Re-read eagerly after a permission flow instead of waiting for the next poll.
                 val permissions: Permissions =
                     remember(permissionRevision, polled) { readPermissions(context) }
 
-                // The CMU dictionary is ~3.3MB and only needed when changing the wake word, so it
-                // loads off the main thread and the UI degrades gracefully until it is ready.
                 val tokenizer by produceState<WakeWordTokenizer?>(null) {
                     value = withContext(Dispatchers.IO) {
                         runCatching {
@@ -89,7 +86,6 @@ class MainActivity : ComponentActivity() {
                     onRestartListening = ::restartListening,
                     onWakeWordApplied = { phrase ->
                         restartListening()
-                        // Otherwise the persistent notification keeps advertising the old phrase.
                         WakeService.refresh(this@MainActivity)
                         scope.launch {
                             snackbarHostState.showSnackbar(String.format(changed, phrase))
@@ -111,15 +107,12 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         KwsEngine.customKeywordLine = WakeWordStore.keywordLine(this)
         permissionRevision++
-        // On a fresh device, ask for the things the system will actually show a dialog for.
         if (!autoPrompted) {
             autoPrompted = true
             val step = readPermissions(this).next
             if (step == SetupStep.MIC || step == SetupStep.NOTIFICATIONS) runStep(step)
         }
     }
-
-    // ---------------- setup / permissions ----------------
 
     private fun runStep(step: SetupStep) {
         when (step) {
@@ -141,10 +134,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Requests a runtime permission, or sends the user to app settings once the system will no
-     * longer show the dialog (permanently denied).
-     */
     private fun askOrOpenSettings(permission: String) {
         val granted = checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
         val canAsk = shouldShowRequestPermissionRationale(permission) ||
@@ -173,9 +162,19 @@ class MainActivity : ComponentActivity() {
             .onFailure { L.e("LAUNCH_SETTINGS_FAIL", it) }
     }
 
-    // ---------------- listening ----------------
-
     private fun toggleService() {
+        val controller = WakeService.controller()
+        if (controller?.state() == WakeController.State.VOICE_ACTIVE ||
+            controller?.state() == WakeController.State.CHATGPT_LAUNCHING
+        ) {
+            if (!controller.endVoice()) {
+                // GPTWake needs Notification Listener access once so it can invoke ChatGPT's own
+                // hang-up action. Open that system page instead of pretending the session ended.
+                launch(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }
+            return
+        }
+
         if (WakeService.isForegroundNow()) {
             stopService(Intent(this, WakeService::class.java))
             return
@@ -185,7 +184,6 @@ class MainActivity : ComponentActivity() {
             runStep(step)
             return
         }
-        // The transparent shim provides the visible moment a background microphone FGS needs.
         startActivity(
             Intent(this, ShimActivity::class.java)
                 .putExtra(ShimActivity.EXTRA_ACTION, "fgs")
