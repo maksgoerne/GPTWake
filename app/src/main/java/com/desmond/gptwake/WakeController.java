@@ -23,8 +23,12 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
     private static final long DEEPLINK_CONFIRM_MS = 7000;
     private static final long VOICE_END_DEBOUNCE_MS = 1500;
     private static final long REACQUIRE_CONFIRM_MS = 3000;
-    /** Last-resort guard so a voice session can never stay open indefinitely after a bad handoff. */
-    private static final long VOICE_MAX_DURATION_MS = 5 * 60_000L;
+
+    /**
+     * No maximum conversation length. This timer is armed only after ChatGPT finishes a spoken
+     * response, and is cancelled/deferred as soon as a new turn produces observable activity.
+     */
+    private static final long VOICE_IDLE_AFTER_RESPONSE_MS = 30_000L;
 
     private final Context ctx;
     private final KwsEngine kws = new KwsEngine();
@@ -33,13 +37,18 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
 
     private volatile State state = State.STOPPED;
     private long launchStartedAt;
-    private long voiceSessionId;
     private boolean deeplinkTried;
     private long voiceEndCandidateSince;
     private long lastAcceptedHitMs;
     private long rawHits;
     private long acceptedHits;
     private long suppressedHits;
+
+    // Response-idle state. Generation invalidates already scheduled checks without cancelling tasks.
+    private long idleGeneration;
+    private boolean assistantWasSpeaking;
+    private long responseEndedAt;
+    private long idleActivityBaselineMs;
 
     public WakeController(Context c) {
         this.ctx = c.getApplicationContext();
@@ -248,15 +257,12 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
         L.i("VOICE_CONFIRMED latencyMs=" + (System.currentTimeMillis() - launchStartedAt));
         set(State.VOICE_ACTIVE);
         voiceEndCandidateSince = 0;
-        final long id = ++voiceSessionId;
-        exec.schedule(() -> {
-            if (state == State.VOICE_ACTIVE && voiceSessionId == id) {
-                L.i("VOICE_SAFETY_TIMEOUT afterMs=" + VOICE_MAX_DURATION_MS);
-                if (!endVoiceNow("safety-timeout")) {
-                    L.i("VOICE_SAFETY_TIMEOUT no hang-up action; waiting for ChatGPT to end");
-                }
-            }
-        }, VOICE_MAX_DURATION_MS, TimeUnit.MILLISECONDS);
+        idleGeneration++;
+        responseEndedAt = 0;
+        idleActivityBaselineMs = 0;
+        assistantWasSpeaking = AudioStateMonitor.isAssistantPlaybackActive();
+        L.i("VOICE_IDLE_MONITOR armed=false assistantSpeaking=" + assistantWasSpeaking
+                + " maxDuration=none idleAfterResponseMs=" + VOICE_IDLE_AFTER_RESPONSE_MS);
     }
 
     /**
@@ -269,6 +275,7 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
     }
 
     private boolean endVoiceNow(String reason) {
+        cancelIdle("hangup-" + reason);
         boolean sent = VoiceNotificationListener.tryHangUp();
         L.i("VOICE_HANGUP_REQUEST reason=" + reason + " sent=" + sent);
         if (sent) {
@@ -288,6 +295,7 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
                     break;
                 case VOICE_ACTIVE:
                     evaluateVoiceEnd();
+                    if (state == State.VOICE_ACTIVE) evaluateResponseIdle(why);
                     break;
                 case EXTERNAL_COMMUNICATION:
                     if (!AudioStateMonitor.isCommunicationMode()
@@ -300,6 +308,85 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
                     break;
             }
         });
+    }
+
+    /** Watches the assistant-speaking -> listening transition. Only that transition arms timeout. */
+    private void evaluateResponseIdle(String why) {
+        boolean speaking = AudioStateMonitor.isAssistantPlaybackActive();
+        if (speaking) {
+            if (!assistantWasSpeaking) {
+                L.i("VOICE_RESPONSE_STARTED why=" + why);
+            }
+            assistantWasSpeaking = true;
+            cancelIdle("assistant-speaking");
+            return;
+        }
+
+        if (assistantWasSpeaking) {
+            assistantWasSpeaking = false;
+            L.i("VOICE_RESPONSE_FINISHED why=" + why);
+            armIdleAfterResponse();
+        }
+    }
+
+    private void armIdleAfterResponse() {
+        responseEndedAt = System.currentTimeMillis();
+        idleActivityBaselineMs = latestConversationActivityMs();
+        final long generation = ++idleGeneration;
+        final long endedAt = responseEndedAt;
+        final long baseline = idleActivityBaselineMs;
+        L.i("VOICE_IDLE_ARM afterMs=" + VOICE_IDLE_AFTER_RESPONSE_MS
+                + " responseEndedAt=" + endedAt + " baseline=" + baseline);
+
+        exec.schedule(() -> checkResponseIdle(generation, endedAt, baseline),
+                VOICE_IDLE_AFTER_RESPONSE_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * The official ChatGPT app owns the microphone during Voice, so GPTWake cannot directly inspect
+     * the user's speech level without stealing/silencing that mic. We therefore use conservative
+     * Android-side evidence. If any voice recording/mode/notification activity appeared after the
+     * answer ended, assume a new user turn may be in progress (including a long search/thinking
+     * phase) and DO NOT hang up; wait until the next spoken ChatGPT response finishes instead.
+     */
+    private void checkResponseIdle(long generation, long endedAt, long baseline) {
+        if (state != State.VOICE_ACTIVE || generation != idleGeneration) return;
+
+        if (AudioStateMonitor.isAssistantPlaybackActive()) {
+            L.i("VOICE_IDLE_CANCEL responseStartedBeforeTimeout");
+            cancelIdle("assistant-speaking-at-timeout");
+            return;
+        }
+
+        long latest = latestConversationActivityMs();
+        if (latest > baseline + 250) {
+            L.i("VOICE_IDLE_DEFER newTurnOrActivity=true latest=" + latest
+                    + " baseline=" + baseline + " responseEndedAt=" + endedAt);
+            // A turn may be thinking/searching. Do not start another blind timer; the next detected
+            // assistant response will re-arm the 30-second window when it actually finishes.
+            cancelIdle("new-turn-or-activity");
+            return;
+        }
+
+        L.i("VOICE_IDLE_TIMEOUT noActivityAfterResponseMs="
+                + (System.currentTimeMillis() - endedAt));
+        if (!endVoiceNow("idle-after-response")) {
+            L.i("VOICE_IDLE_TIMEOUT hang-up unavailable; keeping session open");
+        }
+    }
+
+    private long latestConversationActivityMs() {
+        return Math.max(AudioStateMonitor.lastVoiceAudioActivityMs(),
+                VoiceNotificationListener.lastVoiceActivityMs());
+    }
+
+    private void cancelIdle(String reason) {
+        if (responseEndedAt != 0) {
+            L.i("VOICE_IDLE_CANCEL reason=" + reason);
+        }
+        idleGeneration++;
+        responseEndedAt = 0;
+        idleActivityBaselineMs = 0;
     }
 
     private void evaluateVoiceEnd() {
@@ -319,7 +406,7 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
         }
         if (now - voiceEndCandidateSince >= VOICE_END_DEBOUNCE_MS) {
             L.i("VOICE_ENDED");
-            voiceSessionId++;
+            cancelIdle("voice-ended");
             reacquire();
         }
     }
@@ -357,7 +444,7 @@ public final class WakeController implements AudioProbe.WakeListener, AudioState
 
     public void stop() {
         exec.execute(() -> {
-            voiceSessionId++;
+            cancelIdle("controller-stop");
             AudioProbe.setFeeding(false);
             AudioProbe.stop();
             kws.release();
