@@ -8,9 +8,15 @@ import android.service.notification.StatusBarNotification;
 public class VoiceNotificationListener extends NotificationListenerService {
 
     private static volatile PendingIntent hangUp;
+    private static volatile long lastVoiceActivityMs;
 
     public static PendingIntent hangUpIntent() {
         return hangUp;
+    }
+
+    /** Timestamp of the latest ChatGPT voice-notification update we observed. */
+    public static long lastVoiceActivityMs() {
+        return lastVoiceActivityMs;
     }
 
     /** True when ChatGPT exposed a usable hang-up action through its ongoing voice notification. */
@@ -69,6 +75,7 @@ public class VoiceNotificationListener extends NotificationListenerService {
     }
 
     private void capture(StatusBarNotification sbn) {
+        lastVoiceActivityMs = System.currentTimeMillis();
         Notification n = sbn.getNotification();
         PendingIntent pi = n.extras.getParcelable(
                 Notification.EXTRA_HANG_UP_INTENT, PendingIntent.class);
@@ -96,6 +103,7 @@ public class VoiceNotificationListener extends NotificationListenerService {
     @Override
     public void onNotificationRemoved(StatusBarNotification sbn) {
         if (!isChatGptVoice(sbn)) return;
+        lastVoiceActivityMs = System.currentTimeMillis();
         hangUp = null;
         L.i("NLS_REMOVE id=" + sbn.getId());
     }
