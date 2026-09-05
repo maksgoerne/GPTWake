@@ -37,15 +37,26 @@ android {
 
     signingConfigs {
         getByName("debug") {
-            // Not in git. Its only purpose is a stable debug signature so `adb install -r` keeps
-            // working across rebuilds on a test device; a fresh clone simply falls back to the
-            // SDK's own debug key.
-            val ks = rootProject.file("debug.keystore")
-            if (ks.exists()) {
-                storeFile = ks
-                storePassword = "android"
-                keyAlias = "probe"
-                keyPassword = "android"
+            val ciKeystore = System.getenv("GPTWAKE_SIGNING_STORE_FILE")
+            if (!ciKeystore.isNullOrBlank()) {
+                fun signingEnv(name: String): String =
+                    System.getenv(name)?.takeIf { it.isNotBlank() }
+                        ?: error("Missing signing environment variable: $name")
+                storeFile = file(ciKeystore)
+                storePassword = signingEnv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = signingEnv("ANDROID_KEY_ALIAS")
+                keyPassword = signingEnv("ANDROID_KEY_PASSWORD")
+            } else {
+                // Not in git. Its only purpose is a stable debug signature so `adb install -r` keeps
+                // working across rebuilds on a test device; a fresh clone simply falls back to the
+                // SDK's own debug key.
+                val ks = rootProject.file("debug.keystore")
+                if (ks.exists()) {
+                    storeFile = ks
+                    storePassword = "android"
+                    keyAlias = "probe"
+                    keyPassword = "android"
+                }
             }
         }
     }
